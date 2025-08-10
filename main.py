@@ -14,29 +14,32 @@ import pyautogui
 import atexit
 import shutil
 
-logging.debug("Checking audio devices...")
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+logging.info("Checking audio devices...")
 print(sd.query_devices())
 
-# Configure logging
-logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+def initialize_asr_pipeline():
+    """Initializes and returns the Whisper ASR pipeline."""
+    logging.info("Initializing Whisper pipeline...")
+    try:
+        asr = hf_pipeline(
+            "automatic-speech-recognition",
+            model="openai/whisper-tiny",
+            device=-1,
+        )
+        logging.info("Whisper model loaded successfully.")
+        return asr
+    except Exception as e:
+        logging.error(f"Failed to load Whisper model: {e}")
+        exit(1)
 
-# Initialize Whisper pipeline
-try:
-    asr = hf_pipeline(
-        "automatic-speech-recognition",
-        model="openai/whisper-tiny",
-        device=-1  # CPU; use 0 for GPU if available
-    )
-except Exception as e:
-    logging.error(f"Failed to load Whisper model: {e}")
-    pyautogui.alert("Failed to load Whisper model. Check dependencies and try again.")
-    raise
+asr_pipeline = initialize_asr_pipeline()
 
-# Initialize keyboard controller
 keyboard_controller = Controller()
 is_dictating = False
 audio_buffer = []
-sample_rate = 16000  # Whisper requires 16kHz
+sample_rate = 16000 
 
 
 YDOTOOL_SOCKET = os.path.expanduser("~/.ydotool_socket")
@@ -45,12 +48,11 @@ ydotool_process = None
 def ensure_ydotoold_running():
     """Ensure ydotoold (the uinput daemon) is running and the socket exists."""
     global ydotool_process
-    # If it's already running, do nothing
     if ydotool_process and ydotool_process.poll() is None:
         return
 
     # Prepare the socket directory
-    os.makedirs(os.path.dirname(YDOTOOL_SOCKET), exist_ok=True)
+    # os.makedirs(os.path.dirname(YDOTOOL_SOCKET), exist_ok=True)
     if os.path.exists(YDOTOOL_SOCKET):
         try:
             os.unlink(YDOTOOL_SOCKET)
@@ -60,7 +62,7 @@ def ensure_ydotoold_running():
     # Start ydotoold (not ydotool), with proper ownership
     try:
         ydotool_process = subprocess.Popen([
-            "sudo", "ydotoold",
+            "ydotoold",
             "--socket-path", YDOTOOL_SOCKET,
             "--socket-own", f"{os.getuid()}:{os.getgid()}"
         ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -96,22 +98,28 @@ def is_wayland():
 
 def type_text(text):
     """Inject text into the active input field on Wayland via ydotool."""
+    logging.debug(f"Attemping to Type text: {text}")
     try:
-        focused_window = pyautogui.getActiveWindow()
-        if not focused_window:
-            logging.error("No active window found for text injection")
-            pyautogui.alert("No active window found. Please focus an input field.")
-            return
+        # focused_window = pyautogui.getActiveWindow()
+        # if not focused_window:
+        #     logging.error("No active window found for text injection")
+        #     pyautogui.alert("No active window found. Please focus an input field.")
+        #     return
 
-        if os.name == "posix" and is_wayland() and shutil.which("ydotool"):
-            # Ensure the daemon is up
-            ensure_ydotoold_running()
-            logging.debug(f"Typing via ydotool: {text}")
-            subprocess.run([
-                "ydotool",
-                "--socket-path", YDOTOOL_SOCKET,
-                "type", "--key-delay", "1", text
-            ], check=True)
+        if os.name == "posix" and is_wayland():
+            if shutil.which("ydotool"):
+                logging.debug("Using ydotool for text injection")
+                ensure_ydotoold_running()
+                logging.debug(f"Typing via ydotool: {text}")
+                env = os.environ.copy()
+                env["YDOTOOL_SOCKET"] = YDOTOOL_SOCKET
+                subprocess.run([
+                    "ydotool",
+                    "type", "--key-delay", "1", text
+                ], check=True, env=env)
+            else:
+                logging.error("ydotool not found; cannot type on Wayland")
+                use_clipboard_fallback(text)
         else:
             # Fallback to pynput (X11/macOS)
             logging.debug(f"Typing via pynput: {text}")
@@ -156,7 +164,8 @@ def transcribe_audio(audio_input) -> str:
             audio_path = temp_file.name
             logging.debug(f"Wrote temp WAV: {audio_path}")
 
-        result = asr(audio_path)
+        # Use the global asr_pipeline
+        result = asr_pipeline(audio_path)
         text = result.get("text", "").strip()
         logging.debug(f"Transcription result: {text}")
         return text
@@ -186,11 +195,6 @@ def record_audio():
                 audio_buffer.append(data)
                 # Process 5-second chunks (or when dictation stops)
                 if len(audio_buffer) * 0.5 >= 2:
-                    # audio_chunk = np.concatenate(audio_buffer, axis=0)
-                    # audio_buffer = []
-                    # text = transcribe_audio(audio_chunk)
-                    # if text:
-                    #     type_text(text + " ")
                     process_audio_buffer()
     except Exception as e:
         logging.error(f"Audio capture error: {e}")
@@ -202,7 +206,10 @@ def on_press(key):
     """Handle hotkey press (Ctrl+Alt+1 to start)."""
     global is_dictating, pressed_keys
     try:
-        pressed_keys.add(key)
+        if isinstance(key, keyboard.KeyCode):
+            pressed_keys.add(key)
+        elif isinstance(key, keyboard.Key):
+            pressed_keys.add(key)
 
         logging.debug(f"Key pressed: {key}, pressed_keys: {pressed_keys}")
 
@@ -262,33 +269,29 @@ def process_audio_buffer():
         logging.error(f"Audio processing error: {e}")
 
 # Track pressed keys for hotkey detection
-pressed_keys = set()
-def track_keys(key):
-    if key in (keyboard.Key.ctrl, keyboard.Key.alt, keyboard.KeyCode.from_char("1")):
-        pressed_keys.add(key)
-    return True
+# Note: This is an alternative hotkey tracking method, which is currently
+# commented out in the original file. The on_press/on_release method is in use.
+# pressed_keys = set()
+# def track_keys(key):
+#     if key in (keyboard.Key.ctrl, keyboard.Key.alt, keyboard.KeyCode.from_char("1")):
+#         pressed_keys.add(key)
+#     return True
 
-def untrack_keys(key):
-    pressed_keys.discard(key)
+# def untrack_keys(key):
+#     pressed_keys.discard(key)
 
-# Check dependencies
+# Check dependencies for ydotool
 if os.name == "posix" and is_wayland() and os.system("which ydotool > /dev/null") != 0:
     logging.warning("ydotool not found; Wayland text injection may fail")
     pyautogui.alert("Install ydotool for Wayland support: sudo apt install ydotool")
 
-# Start keyboard listener
-# try:
-#     with keyboard.Listener(on_press=on_press, on_release=on_release, on_press_callback=track_keys, on_release_callback=untrack_keys) as listener:
-#         logging.info("VoxType started. Press Ctrl+Alt+1 to dictate.")
-#         listener.join()
-# except Exception as e:
-#     logging.error(f"Keyboard listener error: {e}")
-#     pyautogui.alert(f"Failed to start VoxType: {e}. Check accessibility permissions on macOS.")
-
+# ==============================================================================
+# --- Main Program Loop ---
+# This starts the keyboard listener after the pipeline has been loaded.
+# ==============================================================================
 try:
-    logging.info("VoxType starting...")
+    logging.info("VoxType started. Press Ctrl+Alt+1 to dictate.")
     with keyboard.Listener(on_press=on_press, on_release=on_release) as listener:
-        logging.info("VoxType started. Press Ctrl+Alt+1 to dictate.")
         listener.join()
 except Exception as e:
     logging.error(f"Keyboard listener error: {e}")
