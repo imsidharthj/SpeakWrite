@@ -5,7 +5,6 @@ import random
 import threading
 import logging
 
-
 try:
     import sounddevice as sd
     import numpy as np
@@ -16,8 +15,7 @@ try:
 except ImportError as e:
     VOICE_AVAILABLE = False
     print(f"Voice input not available: {e}")
-    print("Install with: pip install sounddevice transformers torch pynput")
-
+    print("Install with: pip install sounddevice transformers torch evdev")
 
 if VOICE_AVAILABLE:
     try:
@@ -36,64 +34,6 @@ if VOICE_AVAILABLE:
 recording_active = False
 audio_data = []
 SAMPLE_RATE = 16000
-
-# ============================================================================
-# WINDOW MANAGEMENT FUNCTIONS
-# ============================================================================
-
-def get_windows():
-    """Get list of all open windows using wmctrl"""
-    try:
-        result = subprocess.run(['wmctrl', '-l'], capture_output=True, text=True, check=True)
-        windows = []
-        for line in result.stdout.strip().split('\n'):
-            if line:
-                parts = line.split(None, 3)
-                if len(parts) >= 4:
-                    window_id = parts[0]
-                    title = parts[3]
-                    windows.append((window_id, title))
-        return windows
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        return []
-
-def display_window_menu(windows, text_preview):
-    """Display numbered menu of windows and get user selection"""
-    print(f"\nText to type: '{text_preview[:50]}{'...' if len(text_preview) > 50 else ''}'")
-    print("\nAvailable Windows:")
-    for i, (window_id, title) in enumerate(windows, 1):
-        print(f"{i}. {title}")
-    
-    try:
-        raw_input = input(f"\nSelect window (1-{len(windows)}) or 'q' to quit: ")
-        print(f"Debug: Raw input received: {repr(raw_input)}")
-        choice = ''.join(c for c in raw_input if c.isprintable()).strip()
-        print(f"Debug: Cleaned input: {repr(choice)}")
-        
-        if choice.lower() in ['q', 'quit', 'exit']:
-            return None
-        
-        choice_num = int(choice)
-        if 1 <= choice_num <= len(windows):
-            return windows[choice_num - 1][0]
-        else:
-            print(f"Invalid selection! Please enter a number between 1 and {len(windows)}")
-            return None
-    except ValueError:
-        print(f"Invalid input! Please enter a number between 1 and {len(windows)} or 'q' to quit")
-        return None
-    except KeyboardInterrupt:
-        print("\nExiting...")
-        return None
-
-def focus_window(window_id):
-    """Focus the selected window using wmctrl"""
-    try:
-        subprocess.run(['wmctrl', '-i', '-a', window_id], check=True, capture_output=True)
-        return True
-    except subprocess.CalledProcessError:
-        print(f"Error: Failed to focus window {window_id}")
-        return False
 
 # ============================================================================
 # TYPING FUNCTIONS
@@ -280,82 +220,51 @@ def transcribe_input_to_text():
     return transcribed_text if transcribed_text else None
 
 # ============================================================================
-# USER INPUT FUNCTIONS  
+# BACKGROUND SERVICE
 # ============================================================================
 
-def get_user_text():
-    """Get text input via voice transcription"""
-    if VOICE_AVAILABLE:
-        return transcribe_input_to_text()
-    else:
+def run_dictation_service():
+    """Main background service loop - continuous voice dictation"""
+    print("\n🎯 Voice Dictation Service Started")
+    
+    service_running = True
+    while service_running:
         try:
-            raw_input = input("\nEnter text to type (or 'q' to quit): ")
-            text = ''.join(c if c.isprintable() or c == ' ' else '' for c in raw_input).strip()
-            if text.lower() in ['q', 'quit', 'exit']:
-                return None
-            if not text:
-                print("Please enter some text!")
-                return get_user_text()
-            return text
-        except (KeyboardInterrupt, EOFError):
-            print("\nExiting...")
-            return None
-
-def countdown_timer(seconds=2):
-    """Give user time to prepare after window selection"""
-    print(f"\nFocusing target window and typing in...")
-    for i in range(seconds, 0, -1):
-        print(f"{i}...", end=' ', flush=True)
-        time.sleep(1)
-    print("Typing now!")
-    time.sleep(0.5)
-
-# ============================================================================
-# MAIN PROGRAM
-# ============================================================================
+            transcribed_text = transcribe_input_to_text()
+            if transcribed_text:
+                print(f"\n⌨️  Typing: '{transcribed_text[:50]}{'...' if len(transcribed_text) > 50 else ''}'")
+                if type_text(transcribed_text):
+                    print("✓ Text typed successfully!")
+                else:
+                    print("✗ Failed to type text")
+            else:
+                print("\n❌ No text transcribed")
+            print("\n🎤 Ready for next voice input...")
+        except KeyboardInterrupt:
+            print("\n\n🛑 Service stopped by user")
+            service_running = False
+            break
+        except Exception as e:
+            print(f"\n❌ Service error: {e}")
+            time.sleep(1)
 
 def main():
-    """Main program flow"""
-    print("=== Universal Typing Automation Tool with Voice Input ===")
+    """Initialize and start the background dictation service"""
+    print("=== Background Voice Dictation Service ===")
     
-    if VOICE_AVAILABLE:
-        print("✓ Voice input enabled (Ctrl+Alt to record)")
-    else:
-        print("⚠ Voice input disabled, using manual input fallback")
+    if not VOICE_AVAILABLE:
+        print("❌ Voice input not available. Cannot start service.")
+        sys.exit(1)
+    print("✓ Voice input enabled (Ctrl+Alt to record)")
     
     global pydotool_available
     pydotool_available = init_pydotool()
     if pydotool_available:
         print("✓ pydotool initialized successfully")
     else:
-        print("⚠ pydotool failed, will use subprocess fallback")
+        print("⚠ pydotool failed, will use ydotool subprocess fallback")
     
-    while True:
-        windows = get_windows()
-        if not windows:
-            print("Error: No windows found or wmctrl not available")
-            print("Make sure wmctrl is installed: sudo apt install wmctrl")
-            sys.exit(1)
-        
-        text = get_user_text()
-        if text is None:
-            break
-        
-        selected_window = display_window_menu(windows, text)
-        if not selected_window:
-            if selected_window is None:
-                break
-            continue
-        
-        print(f"\nAttempting to focus target window...")
-        if focus_window(selected_window):
-            countdown_timer(2)
-            if type_text(text):
-                print("✓ Text typed successfully!\n")
-            else:
-                print("✗ Failed to type text\n")
-        else:
-            print("✗ Failed to focus window. Please try selecting a different window.\n")
+    run_dictation_service()
 
 if __name__ == "__main__":
     try:
